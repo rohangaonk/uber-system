@@ -5,6 +5,7 @@ import { HealthModule } from './health/health.module';
 import { DriversModule } from './drivers/drivers.module';
 import { FaresModule } from './fares/fares.module';
 import { RidesModule } from './rides/rides.module';
+import { RedisModule } from './redis/redis.module';
 import { Rider } from './riders/rider.entity';
 import { Driver } from './drivers/driver.entity';
 import { Fare } from './fares/fare.entity';
@@ -29,6 +30,7 @@ import { Ride } from './rides/ride.entity';
       inject: [ConfigService],
     }),
     HealthModule,
+    RedisModule,
     DriversModule,
     FaresModule,
     RidesModule,

@@ -133,31 +133,47 @@ conditional insert or a unique partial index on `(rider_id, status IN (active st
 
 ---
 
-## Phase 3 — Driver Location & Availability
+## Phase 3 — Driver Location & Availability ✅
 
 _Parallel with Phase 2 once schema is stable._
 
-**Steps**
+**Decisions made**
 
-1. Redis setup — `ioredis` client, GEO commands enabled
-2. `POST /drivers/location` — driver sends `{ lat, lon }`, stored with `GEOADD`
-   in a Redis key like `driver:locations`. Companion sorted set `driver:last_seen`
-   keyed by timestamp for stale cleanup.
-3. Stale driver cleanup — background job every 30s removes drivers not seen in 30s
-   from both the GEO set and the sorted set.
-4. Driver availability flag — tracked in PostgreSQL `drivers.is_available`.
-   Redis GEO is source-of-truth for proximity; Postgres is source-of-truth for availability.
-5. Seed a set of mock drivers and a location update loop for local testing.
+- Redis GEO as source-of-truth for proximity (geohashing, `GEOSEARCH`). No PostGIS needed for V1.
+- Postgres `drivers.is_available` as source-of-truth for availability — keeps business state
+  transactional alongside ride confirmation. Tradeoff: two-hop (Redis → Postgres) per match
+  attempt. Acceptable because matching is async (Kafka consumer), not on the HTTP response path.
+- Stale cleanup uses a companion sorted set `driver:last_seen` (scores = Unix ms timestamps).
+  `ZRANGEBYSCORE` finds all members below a threshold in O(log N + M) — the GEO set alone cannot
+  do this because its scores encode geohash, not time.
+- Cleanup runs as a NestJS `@Cron` (every 30s) for V1. In production: same scheduling model
+  but guarded with a Redis NX lock so only one Fargate task runs it. Not RabbitMQ — this is a
+  scheduled maintenance job, not an event-driven pipeline.
+- Future upgrade path (when metrics justify): move availability into a Redis Set so `findNearby`
+  becomes a pure Redis `GEOSEARCH` + `SINTERCARD` — eliminating the Postgres round-trip entirely.
 
-**Key Decision**
-Redis GEO (`GEOSEARCH`) handles proximity queries efficiently using geohashing —
-no full table scan, no PostGIS needed for V1.
+**What was built**
 
-**Verification**
+1. ✅ `src/redis/redis.module.ts` — `@Global()` module providing `ioredis` client via `REDIS_CLIENT`
+   injection token. Reads `REDIS_HOST` / `REDIS_PORT` from env.
+2. ✅ `POST /drivers/location` — validates `{ driverId, lat, lon }`, checks driver exists in
+   Postgres (404 if not), then atomically runs `GEOADD driver:locations` and
+   `ZADD driver:last_seen <now> <driverId>`. Returns 204 No Content.
+3. ✅ `DriversService.findNearby(lat, lon, radiusKm)` — `GEOSEARCH` → `WHERE id IN (...) AND
+is_available = true` → returns distance-sorted `NearbyDriver[]`. Phase 4 ready.
+4. ✅ `DriversService.setAvailability(driverId, bool)` — updates Postgres flag. Called on
+   ride confirmation and cancellation in Phases 5–6.
+5. ✅ `DriversCleanupService` — `@Cron(EVERY_30_SECONDS)`, `ZRANGEBYSCORE driver:last_seen -inf
+<now-30s>`, then `ZREM` on both `driver:last_seen` and `driver:locations`.
+6. ✅ `src/database/seed.ts` (`npm run seed`) — inserts 10 mock drivers near Mumbai into Postgres
+   and registers their locations in both Redis structures.
 
-- Drivers added to Redis GEO can be queried by radius
-- Drivers not updated within 30s are removed from the GEO index
-- `GEOSEARCH driver:locations FROMLONLAT <lon> <lat> BYRADIUS 5 km ASC` returns correct results
+**Verification** ✅
+
+- `GEOSEARCH driver:locations FROMLONLAT 72.877 19.076 BYRADIUS 5 km ASC WITHDIST` returns all
+  10 seeded drivers sorted by distance
+- Build passes cleanly (`npm run build`)
+- Stale drivers are removed from both Redis sets by the cron after 30s of inactivity
 
 ---
 

@@ -22,7 +22,8 @@
     "migration:generate": "npm run typeorm migration:generate -- src/database/migrations/Migration -d src/database/data-source.ts",
     "migration:run": "npm run typeorm migration:run -- -d src/database/data-source.ts",
     "migration:revert": "npm run typeorm migration:revert -- -d src/database/data-source.ts",
-    "migrate": "npm run migration:run"
+    "migrate": "npm run migration:run",
+    "seed": "npx ts-node -r tsconfig-paths/register src/database/seed.ts"
   },
   "dependencies": {
     "@nestjs/common": "^11.0.1",
@@ -30,6 +31,7 @@
     "@nestjs/core": "^11.0.1",
     "@nestjs/microservices": "^11.1.17",
     "@nestjs/platform-express": "^11.0.1",
+    "@nestjs/schedule": "^6.1.1",
     "@nestjs/typeorm": "^11.0.0",
     "class-transformer": "^0.5.1",
     "class-validator": "^0.15.1",
