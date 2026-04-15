@@ -1,4 +1,11 @@
-import { IsNumber, IsString, IsUUID, Max, MaxLength, Min } from 'class-validator';
+import {
+  IsNumber,
+  IsString,
+  IsUUID,
+  Max,
+  MaxLength,
+  Min,
+} from 'class-validator';
 
 export class CreateFareDto {
   @IsUUID()

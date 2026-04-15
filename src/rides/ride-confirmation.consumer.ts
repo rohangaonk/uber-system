@@ -33,7 +33,9 @@ export class RideConfirmationConsumer {
   ) {}
 
   @EventPattern(KAFKA_TOPICS.DRIVER_RESPONSE)
-  async handleDriverResponse(@Payload() data: DriverResponsePayload): Promise<void> {
+  async handleDriverResponse(
+    @Payload() data: DriverResponsePayload,
+  ): Promise<void> {
     const { rideId, driverId, decision } = data;
 
     if (decision === 'accept') {
@@ -47,16 +49,26 @@ export class RideConfirmationConsumer {
     const result = await this.rideRepository
       .createQueryBuilder()
       .update(Ride)
-      .set({ status: RideStatus.CONFIRMED, driverId, offeredDriverId: null, offerExpiresAt: null })
-      .where('id = :rideId AND status = :status AND offered_driver_id = :driverId', {
-        rideId,
-        status: RideStatus.DRIVER_OFFERED,
+      .set({
+        status: RideStatus.CONFIRMED,
         driverId,
+        offeredDriverId: null,
+        offerExpiresAt: null,
       })
+      .where(
+        'id = :rideId AND status = :status AND offered_driver_id = :driverId',
+        {
+          rideId,
+          status: RideStatus.DRIVER_OFFERED,
+          driverId,
+        },
+      )
       .execute();
 
     if ((result.affected ?? 0) === 0) {
-      this.logger.warn(`Ride ${rideId} accept by driver ${driverId} lost the race — discarding`);
+      this.logger.warn(
+        `Ride ${rideId} accept by driver ${driverId} lost the race — discarding`,
+      );
       return;
     }
 
@@ -82,16 +94,25 @@ export class RideConfirmationConsumer {
     const result = await this.rideRepository
       .createQueryBuilder()
       .update(Ride)
-      .set({ status: RideStatus.RIDE_REQUESTED, offeredDriverId: null, offerExpiresAt: null })
-      .where('id = :rideId AND status = :status AND offered_driver_id = :driverId', {
-        rideId,
-        status: RideStatus.DRIVER_OFFERED,
-        driverId,
+      .set({
+        status: RideStatus.RIDE_REQUESTED,
+        offeredDriverId: null,
+        offerExpiresAt: null,
       })
+      .where(
+        'id = :rideId AND status = :status AND offered_driver_id = :driverId',
+        {
+          rideId,
+          status: RideStatus.DRIVER_OFFERED,
+          driverId,
+        },
+      )
       .execute();
 
     if ((result.affected ?? 0) === 0) {
-      this.logger.warn(`Ride ${rideId} reject by driver ${driverId} lost the race — discarding`);
+      this.logger.warn(
+        `Ride ${rideId} reject by driver ${driverId} lost the race — discarding`,
+      );
       return;
     }
 
@@ -113,7 +134,9 @@ export class RideConfirmationConsumer {
           sourceLon: ride.fare.sourceLon,
         },
       });
-      this.logger.log(`Ride ${rideId} rejected by driver ${driverId} — re-queuing for matching`);
+      this.logger.log(
+        `Ride ${rideId} rejected by driver ${driverId} — re-queuing for matching`,
+      );
     }
   }
 }

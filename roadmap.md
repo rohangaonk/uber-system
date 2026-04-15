@@ -177,7 +177,7 @@ is_available = true` → returns distance-sorted `NearbyDriver[]`. Phase 4 ready
 
 ---
 
-## Phase 4 — Ride Matching Engine
+## Phase 4 — Ride Matching Engine ✅
 
 _Core of the system. Event-driven via Kafka — correctness before performance._
 
@@ -292,9 +292,11 @@ POST /rides  →  INSERT ride (status: ride_requested, matching_deadline: now+60
 
 ---
 
-## Phase 5 — Driver Accept / Reject & Ride Confirmation
+## Phase 5 — Driver Accept / Reject & Ride Confirmation ✅
 
 _Complete the loop: rider gets a confirmed ride or failure response._
+
+_Timeout handling remains in Phase 4's offer-expiry cron; this phase only handles explicit driver responses._
 
 **Steps**
 
@@ -306,9 +308,18 @@ _Complete the loop: rider gets a confirmed ride or failure response._
      `is_available = false`, release Redis lock. Rider's next poll returns `confirmed` + driver details.
    - On **reject**: release Redis lock, publish a `ride.requested` retry event so the
      matching consumer re-enters the offer loop with the next candidate.
-3. Timeout handling — if driver does not respond within 10s (Redis TTL expires),
-   the matching consumer detects the failed lock renewal and moves to the next candidate
-   without waiting for a `driver.response` event.
+3. No separate timeout path here — if the driver does not respond within 10s, the Phase 4
+   offer-timeout cron reclaims the ride and re-publishes `ride.requested`.
+
+**What was built**
+
+1. ✅ `PATCH /rides/:rideId` — driver response endpoint validates ride state, driver ownership,
+   and offer expiry before emitting `driver.response`.
+2. ✅ `RideConfirmationConsumer` — consumes `driver.response` and handles both outcomes:
+   - `accept` transitions the ride to `confirmed`, assigns `driver_id`, marks the driver
+     unavailable, and clears Redis coordination keys.
+   - `reject` releases the lock, adds the driver to the rejected set, and re-queues matching.
+3. ✅ Phase 5 unit tests — cover successful accept, reject re-queueing, and stale-response races.
 
 **Verification**
 
@@ -331,6 +342,13 @@ _Correctness under failure scenarios._
 2. Handle the race: cancellation arrives while accept/reject is in-flight — use a DB
    transaction with a status check to ensure only one transition wins.
 3. Fare expiry cleanup — background job or trigger to mark fares `expired` after TTL.
+
+**What was started**
+
+1. ✅ `POST /rides/:rideId/cancel` added to the rides controller.
+2. ✅ Cancellation now uses a transactional status check and releases driver coordination
+   keys when the ride was offered to a driver.
+3. ⏳ Acceptance/cancellation race verification is still pending cleanup in the next session.
 
 **Verification**
 

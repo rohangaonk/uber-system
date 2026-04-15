@@ -35,7 +35,9 @@ export class OfferTimeoutService {
       const driverId = ride.offeredDriverId;
       if (!driverId) continue;
 
-      this.logger.log(`Ride ${ride.id} offer to driver ${driverId} expired — resetting`);
+      this.logger.log(
+        `Ride ${ride.id} offer to driver ${driverId} expired — resetting`,
+      );
 
       // Increment timeout count for this driver on this ride
       await this.redis.hincrby(TIMEOUT_HASH_KEY(ride.id), driverId, 1);
@@ -47,17 +49,26 @@ export class OfferTimeoutService {
       const result = await this.rideRepository
         .createQueryBuilder()
         .update(Ride)
-        .set({ status: RideStatus.RIDE_REQUESTED, offeredDriverId: null, offerExpiresAt: null })
-        .where('id = :rideId AND status = :status AND offered_driver_id = :driverId', {
-          rideId: ride.id,
-          status: RideStatus.DRIVER_OFFERED,
-          driverId,
+        .set({
+          status: RideStatus.RIDE_REQUESTED,
+          offeredDriverId: null,
+          offerExpiresAt: null,
         })
+        .where(
+          'id = :rideId AND status = :status AND offered_driver_id = :driverId',
+          {
+            rideId: ride.id,
+            status: RideStatus.DRIVER_OFFERED,
+            driverId,
+          },
+        )
         .execute();
 
       if ((result.affected ?? 0) === 0) {
         // Race condition — ride was just accepted/cancelled, discard
-        this.logger.log(`Ride ${ride.id} timeout cron lost the race — discarding`);
+        this.logger.log(
+          `Ride ${ride.id} timeout cron lost the race — discarding`,
+        );
         continue;
       }
 

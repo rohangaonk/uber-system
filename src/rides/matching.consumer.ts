@@ -38,7 +38,9 @@ export class MatchingConsumer {
   ) {}
 
   @EventPattern(KAFKA_TOPICS.RIDE_REQUESTED)
-  async handleRideRequested(@Payload() data: RideRequestedPayload): Promise<void> {
+  async handleRideRequested(
+    @Payload() data: RideRequestedPayload,
+  ): Promise<void> {
     const { rideId, sourceLat, sourceLon } = data;
 
     const ride = await this.rideRepository.findOne({ where: { id: rideId } });
@@ -55,12 +57,17 @@ export class MatchingConsumer {
 
     // 1. Check matching deadline
     if (new Date() > ride.matchingDeadline) {
-      this.logger.log(`Ride ${rideId} matching deadline elapsed — marking no_driver_found`);
+      this.logger.log(
+        `Ride ${rideId} matching deadline elapsed — marking no_driver_found`,
+      );
       await this.rideRepository
         .createQueryBuilder()
         .update(Ride)
         .set({ status: RideStatus.NO_DRIVER_FOUND })
-        .where('id = :rideId AND status = :status', { rideId, status: RideStatus.RIDE_REQUESTED })
+        .where('id = :rideId AND status = :status', {
+          rideId,
+          status: RideStatus.RIDE_REQUESTED,
+        })
         .execute();
       return;
     }
@@ -77,25 +84,39 @@ export class MatchingConsumer {
     }
 
     // 3. Find nearby available drivers
-    const candidates = await this.driversService.findNearby(sourceLat, sourceLon, 5);
+    const candidates = await this.driversService.findNearby(
+      sourceLat,
+      sourceLon,
+      5,
+    );
 
     // 4. Filter out permanently skipped drivers
     const eligible = candidates.filter((c) => {
       if (rejectedSet.has(c.driverId)) return false;
-      if ((timeoutCounts[c.driverId] ?? 0) >= MAX_TIMEOUTS_BEFORE_SKIP) return false;
+      if ((timeoutCounts[c.driverId] ?? 0) >= MAX_TIMEOUTS_BEFORE_SKIP)
+        return false;
       return true;
     });
 
     if (eligible.length === 0) {
       this.logger.log(`Ride ${rideId} — no eligible candidates, re-queuing`);
-      this.kafkaClient.emit(KAFKA_TOPICS.RIDE_REQUESTED, { key: rideId, value: data });
+      this.kafkaClient.emit(KAFKA_TOPICS.RIDE_REQUESTED, {
+        key: rideId,
+        value: data,
+      });
       return;
     }
 
     // 5. Try to lock a driver (closest first)
     for (const candidate of eligible) {
       const lockKey = DRIVER_LOCK_KEY(candidate.driverId);
-      const acquired = await this.redis.set(lockKey, rideId, 'PX', LOCK_TTL_MS, 'NX');
+      const acquired = await this.redis.set(
+        lockKey,
+        rideId,
+        'PX',
+        LOCK_TTL_MS,
+        'NX',
+      );
 
       if (acquired !== 'OK') {
         // Driver is currently locked by another ride offer — skip
@@ -112,7 +133,10 @@ export class MatchingConsumer {
           offeredDriverId: candidate.driverId,
           offerExpiresAt,
         })
-        .where('id = :rideId AND status = :status', { rideId, status: RideStatus.RIDE_REQUESTED })
+        .where('id = :rideId AND status = :status', {
+          rideId,
+          status: RideStatus.RIDE_REQUESTED,
+        })
         .execute();
 
       if ((result.affected ?? 0) === 0) {
@@ -136,6 +160,9 @@ export class MatchingConsumer {
 
     // All candidates were locked — re-queue and let the next iteration try
     this.logger.log(`Ride ${rideId} — all candidates locked, re-queuing`);
-    this.kafkaClient.emit(KAFKA_TOPICS.RIDE_REQUESTED, { key: rideId, value: data });
+    this.kafkaClient.emit(KAFKA_TOPICS.RIDE_REQUESTED, {
+      key: rideId,
+      value: data,
+    });
   }
 }

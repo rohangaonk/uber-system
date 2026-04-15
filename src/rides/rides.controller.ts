@@ -36,4 +36,10 @@ export class RidesController {
   ) {
     return this.ridesService.driverRespond(rideId, dto.driverId, dto.decision);
   }
+
+  @Post(':rideId/cancel')
+  @HttpCode(HttpStatus.NO_CONTENT)
+  cancelRide(@Param('rideId', ParseUUIDPipe) rideId: string) {
+    return this.ridesService.cancelRide(rideId);
+  }
 }

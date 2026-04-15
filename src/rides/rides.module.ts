@@ -26,7 +26,9 @@ import { KAFKA_CLIENT, KAFKA_CONSUMER_GROUPS } from '../kafka/kafka.constants';
           options: {
             client: {
               clientId: 'rides-producer',
-              brokers: [configService.get<string>('KAFKA_BROKER', 'localhost:9092')],
+              brokers: [
+                configService.get<string>('KAFKA_BROKER', 'localhost:9092'),
+              ],
             },
             consumer: { groupId: KAFKA_CONSUMER_GROUPS.MATCHING_WORKERS },
           },
