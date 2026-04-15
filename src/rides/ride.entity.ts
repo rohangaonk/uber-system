@@ -48,6 +48,15 @@ export class Ride {
   })
   status: RideStatus;
 
+  @Column({ name: 'offered_driver_id', nullable: true, type: 'uuid' })
+  offeredDriverId: string | null;
+
+  @Column({ name: 'offer_expires_at', nullable: true, type: 'timestamptz' })
+  offerExpiresAt: Date | null;
+
+  @Column({ name: 'matching_deadline', type: 'timestamptz' })
+  matchingDeadline: Date;
+
   @Column({ length: 500 })
   source: string;
 

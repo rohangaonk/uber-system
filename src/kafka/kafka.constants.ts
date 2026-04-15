@@ -1,3 +1,5 @@
+export const KAFKA_CLIENT = 'KAFKA_CLIENT';
+
 export const KAFKA_TOPICS = {
   RIDE_REQUESTED: 'ride.requested',
   DRIVER_OFFERED: 'driver.offered',

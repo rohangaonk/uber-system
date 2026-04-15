@@ -27,6 +27,12 @@ export class Fare {
   @Column({ length: 500 })
   destination: string;
 
+  @Column({ name: 'source_lat', type: 'double precision' })
+  sourceLat: number;
+
+  @Column({ name: 'source_lon', type: 'double precision' })
+  sourceLon: number;
+
   @Column({ type: 'numeric', precision: 10, scale: 2 })
   price: number;
 

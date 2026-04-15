@@ -28,6 +28,8 @@ export class FaresService {
       riderId: dto.riderId,
       source: dto.source,
       destination: dto.destination,
+      sourceLat: dto.sourceLat,
+      sourceLon: dto.sourceLon,
       price,
       etaMinutes,
       expiresAt,

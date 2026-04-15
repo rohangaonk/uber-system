@@ -181,55 +181,114 @@ is_available = true` → returns distance-sorted `NearbyDriver[]`. Phase 4 ready
 
 _Core of the system. Event-driven via Kafka — correctness before performance._
 
+**Decisions made**
+
+- Matching is async because it can take up to 60s (multiple driver offer/timeout cycles). Holding
+  an HTTP connection open for that duration would be wasteful and fragile. Rider submits ride and
+  polls `GET /rides/:rideId/status`.
+- **Postgres is the source of truth for ride state.** Redis is a speed gate only — it prevents
+  concurrent consumers from offering the same driver simultaneously. Redis correctness failures
+  are non-fatal; a conditional DB update is the final arbiter.
+- **Timeout ≠ rejection.** A timed-out driver is re-eligible on the next matching iteration
+  (could be a network blip). An explicitly rejected driver is added to `ride:rejected:<rideId>`
+  Redis set and permanently skipped for this ride.
+- To prevent burning the full 60s budget on a repeatedly unresponsive driver: track timeout count
+  in `ride:timed_out:<rideId>` (Redis hash, `driverId → count`). If count ≥ 2 for a driver on
+  this ride, treat as rejected and skip.
+- The retry loop has no `while` or sleeping thread. Instead: on each failure (timeout, reject,
+  all candidates busy) the consumer re-publishes `ride.requested` to Kafka. Each message is one
+  iteration. The `matching_deadline` timestamp on the Ride row is the 60s escape hatch checked
+  at the top of every iteration.
+- Late-accept guard: driver calling `PATCH /rides/:rideId` validates `ride.status == driver_offered`,
+  `ride.offered_driver_id == driverId`, and `now < offer_expires_at`. Any mismatch returns 410.
+- All status transitions use a conditional `WHERE status = <expected>` update. Whoever wins gets
+  rowcount = 1; the loser discards silently. This resolves cancel/accept race conditions.
+
+**Schema additions to `rides` table**
+
+- `matching_deadline TIMESTAMPTZ` — set to `now + 60s` on ride creation
+- `offered_driver_id UUID FK nullable` — driver currently being offered the ride
+- `offer_expires_at TIMESTAMPTZ nullable` — set to `now + 10s` when offer is made
+
+**Redis keys**
+
+- `driver:lock:<driverId>` — NX lock (TTL 10s), prevents double-offering a driver across consumers
+- `ride:rejected:<rideId>` — SET of driverIds who explicitly rejected this ride (TTL 120s)
+- `ride:timed_out:<rideId>` — HASH of `driverId → timeout_count` (TTL 120s)
+
 **Event Flow**
 
 ```
-POST /rides  →  produce ride.requested
+POST /rides  →  INSERT ride (status: ride_requested, matching_deadline: now+60s)
+                →  publish ride.requested
+                →  return { rideId, status: ride_requested }  [rider starts polling]
                     ↓
-         [matching-workers consumer group]
+         [matching-workers consumer]
                     ↓
-         GEOSEARCH + Redis NX lock
+              check matching_deadline — if elapsed → no_driver_found, DONE
                     ↓
-             produce driver.offered
+         GEOSEARCH → filter rejected + high-timeout-count drivers
                     ↓
-         [driver polling / mock notify]
+         SET driver:lock:<driverId> NX PX 10000
+                    ↓
+         UPDATE ride { status: driver_offered, offered_driver_id, offer_expires_at: now+10s }
+                    ↓
+         [driver polls pending offer endpoint, sees the offer]
+                    ↓
+         PATCH /rides/:rideId { decision: accept | reject }
+                    ↓
+         publish driver.response
+                    ↓
+         [ride-confirmation consumer]
 ```
 
 **Steps**
 
-1. `POST /rides` publishes a `ride.requested` event to Kafka (topic: `ride.requested`).
-   The HTTP response returns immediately with `{ rideId, status: "ride_requested" }`.
-   Rider begins polling `GET /rides/:rideId/status`.
-2. Matching consumer (`consumer group: matching-workers`) consumes `ride.requested`.
-   Candidate selection — `GEOSEARCH` within 5km radius, filter by `is_available = true`,
-   rank by distance ascending.
-3. Distributed lock per driver — `SET driver:lock:<driverId> rideId NX PX 10000`
-   (Redis NX + TTL). Prevents two concurrent matching consumers from offering the same driver.
-4. On successful lock: transition ride to `driver_offered`, persist `offered_driver_id`,
-   publish `driver.offered` event. For V1, driver notification is a mock log;
-   driver polls a dedicated endpoint to see pending offers.
-5. If lock acquisition fails (driver already locked): skip candidate, try next.
-6. If a driver does not respond within 10s (TTL expires): matching consumer retries
-   with the next candidate.
-7. If all candidates exhausted within 60s: transition ride to `no_driver_found`,
-   publish `ride.failed` event.
+1. `POST /rides` — validate fareId, enforce one-active-ride-per-rider invariant, INSERT Ride with
+   `{ status: ride_requested, matching_deadline: now+60s }`. Publish `ride.requested`. Return
+   `{ rideId, status: ride_requested }` immediately.
+2. Matching consumer receives `ride.requested`:
+   - Check `now > matching_deadline` → UPDATE `no_driver_found`, DONE.
+   - `GEOSEARCH` within 5km, filter `is_available = true`.
+   - Filter out drivers in `ride:rejected:<rideId>` and those with timeout count ≥ 2.
+   - Attempt `SET driver:lock:<driverId> <rideId> NX PX 10000` on closest candidate.
+   - Lock acquired → UPDATE ride `{ status: driver_offered, offered_driver_id, offer_expires_at }`. Exit.
+   - Lock failed → try next candidate. All candidates locked/skipped → re-publish `ride.requested`, exit.
+3. Offer timeout cron (`@Cron` every 5s) — finds rides where `status = driver_offered AND offer_expires_at < now`.
+   For each: `HINCRBY ride:timed_out:<rideId> <driverId> 1`, DEL `driver:lock:<driverId>`,
+   UPDATE ride `{ status: ride_requested, offered_driver_id: null, offer_expires_at: null }`,
+   re-publish `ride.requested`.
+4. `PATCH /rides/:rideId` — driver sends `{ decision: accept | reject }`. Validate status,
+   `offered_driver_id`, and `offer_expires_at`. Publish `driver.response`.
+5. Ride confirmation consumer receives `driver.response`:
+   - **Accept**: UPDATE ride `{ status: confirmed, driver_id }`, UPDATE driver `{ is_available: false }`,
+     DEL `driver:lock`, DEL `ride:rejected` and `ride:timed_out` (cleanup).
+   - **Reject**: `SADD ride:rejected:<rideId> <driverId>`, DEL `driver:lock`,
+     UPDATE ride `{ status: ride_requested, offered_driver_id: null }`, re-publish `ride.requested`.
 
-**Consumer Group Strategy (MSK)**
+**Cancellation interactions**
 
-- `matching-workers` — processes `ride.requested`; scales horizontally, one worker per Kafka partition.
-- Each consumer holds the Redis lock for the driver it is currently offering — no two consumers
-  can offer the same driver simultaneously due to the NX lock.
+- Cancel during `ride_requested`: UPDATE `{ status: cancelled }` — straightforward.
+- Cancel during `driver_offered`: conditional UPDATE `WHERE status = driver_offered`,
+  DEL `driver:lock`, `SADD ride:rejected` (driver freed). On success UPDATE `{ status: cancelled }`.
+- Cancel after `confirmed`: return 400 — out of scope for V1.
+- Race (cancel + accept in-flight): both use conditional update; one gets rowcount = 1, the other discards.
 
-**Key Invariant**
-No driver can be simultaneously offered two rides. The Redis `NX` lock enforces this —
-if acquisition fails, skip this candidate and move on.
+**Consumer Group Strategy**
+
+- `matching-workers` — processes `ride.requested`; scales horizontally (one worker per Kafka partition).
+- `ride-confirmation` — processes `driver.response`.
+- Redis NX lock ensures no two `matching-workers` instances offer the same driver concurrently.
 
 **Verification**
 
-- `ride.requested` event is visible in Kafka UI after `POST /rides`
+- `ride.requested` event visible in Redpanda Console after `POST /rides`
 - Matching consumer picks the closest available driver
-- Two concurrent match consumers do not both lock the same driver
-- `no_driver_found` is returned (and ride row updated) when no drivers are nearby
+- Two concurrent consumers cannot both lock the same driver
+- Rejected driver does not receive a second offer on the same ride
+- Timed-out driver IS re-offered on the next iteration (unless timed out ≥ 2 times)
+- Late accept after `offer_expires_at` returns 410
+- `no_driver_found` ride row updated when `matching_deadline` elapses
 
 ---
 

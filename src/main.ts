@@ -15,14 +15,26 @@ async function bootstrap() {
   // Phase 2 produces no Kafka events; skip to avoid a hard crash when Kafka is not running.
   // Set KAFKA_ENABLED=true before Phase 4 (matching engine).
   if (process.env.KAFKA_ENABLED === 'true') {
+    // matching-workers: consumes ride.requested
     app.connectMicroservice<MicroserviceOptions>({
       transport: Transport.KAFKA,
       options: {
         client: {
-          clientId: 'uber-system',
+          clientId: 'uber-system-matching',
           brokers: [process.env.KAFKA_BROKER ?? 'localhost:9092'],
         },
         consumer: { groupId: KAFKA_CONSUMER_GROUPS.MATCHING_WORKERS },
+      },
+    });
+    // ride-confirmation: consumes driver.response
+    app.connectMicroservice<MicroserviceOptions>({
+      transport: Transport.KAFKA,
+      options: {
+        client: {
+          clientId: 'uber-system-confirmation',
+          brokers: [process.env.KAFKA_BROKER ?? 'localhost:9092'],
+        },
+        consumer: { groupId: KAFKA_CONSUMER_GROUPS.RIDE_CONFIRMATION },
       },
     });
     await app.startAllMicroservices();
