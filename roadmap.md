@@ -341,7 +341,7 @@ _Correctness under failure scenarios._
    the driver available again. Cancellation after `confirmed` is out of scope for V1.
 2. Handle the race: cancellation arrives while accept/reject is in-flight — use a DB
    transaction with a status check to ensure only one transition wins.
-3. Fare expiry cleanup — background job or trigger to mark fares `expired` after TTL.
+3. ~~Fare expiry cleanup~~ — **skipped (V1 decision)**: `expires_at` column is the source of truth; the runtime check in `POST /rides` enforces expiry. No `status` column on Fare, no cron needed. Consumers of the fares table filter by `expires_at < now` directly.
 
 **What was started**
 
@@ -389,6 +389,37 @@ _Local parity verified first. CDK mirrors Docker Compose exactly._
   Scaling Fargate desired count = scaling Kafka consumer group members automatically.
 - CDK stack lives in `infra/` at the repo root, versioned alongside app code.
 - Dev and prod are separate CDK stacks (`InfraStack-dev`, `InfraStack-prod`) sharing the same constructs.
+
+**Cron orchestration strategy (production)**
+
+The two crons (`OfferTimeoutService` every 5s, `DriversCleanupService` every 30s) cannot live
+in the same ECS service as the HTTP server in production. Reasons:
+
+- **Different scaling axes**: the API service scales with HTTP request traffic; the cron
+  orchestrator doesn't scale at all — it just needs to be _alive_. Coupling them means cron
+  instance count grows with HTTP load, which is meaningless.
+- **Double-execution risk**: if the API service runs at desired count = 3, all 3 instances fire
+  the cron simultaneously — `OfferTimeoutService` would `HINCRBY` timeout counts 3x per tick and
+  re-publish the same rides multiple times per cycle.
+
+Chosen approach: **dedicated cron ECS task definition, desired count = 2, Redis NX lock**
+
+- Separate task definition — no ALB, no HTTP listener, cron logic only.
+- Desired count = 2 for redundancy. If one crashes, ECS takes 30–60s to restart — for a 10s
+  offer window, desired count = 1 (SPOF) means silent timeout failures until recovery.
+- Before each cron body: `SET cron:<name>:lock NX PX <interval_ms>`. Only the winner executes;
+  the other skips silently. Lock TTL ≤ cron interval so it always expires before the next tick.
+- **Crash safety**: if the lock holder crashes mid-execution, the lock TTL expires and the other
+  instance picks up the next tick. Partial work is safe — the matching consumer checks
+  `matching_deadline` at the top of every iteration, so re-processing an already-reset ride
+  is a no-op.
+- **Why not EventBridge Scheduler?** Minimum granularity is 1 minute. Our offer timeout cron
+  needs 5s — not viable.
+- **Post-MVP evolution**: replace the DB-scan cron with a Kafka-native pattern. When a driver
+  is offered, publish an `offer.timeout` message with `offerExpiresAt` in the payload to a
+  dedicated topic. A consumer processes the timeout as an event when the timestamp is due.
+  Eliminates DB polling entirely and distributes naturally across consumer instances with no
+  lock needed — at the cost of needing strong consumer idempotency for duplicate delivery.
 
 **Verification**
 
